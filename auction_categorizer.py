@@ -1,83 +1,140 @@
 import os
+import gradio as gr
 import google.generativeai as genai
-import tkinter as tk
-from tkinter import filedialog, Text
 
 
-genai.configure(api_key="API")
+API_KEY = os.environ.get("GEMINI_API_KEY")
 
+MODEL_NAME = "gemini-2.5-pro"
 
-def upload_to_gemini(path, mime_type=None):
-    file = genai.upload_file(path, mime_type=mime_type)
-    print(f"Uploaded file '{file.display_name}' as: {file.uri}")
-    return file
+GENERATION_CONFIG = {
+    "temperature": 1,
+    "top_p": 0.95,
+    "top_k": 64,
+    "max_output_tokens": 8192,
+    "response_mime_type": "text/plain",
+}
 
+PROMPT = """
+Act as an Auction House item categorizer. Given an item's title, description,
+and image, determine:
 
-def process_input():
-    image_path = filedialog.askopenfilename(title="Select an Image")
-    text_input = text_box.get("1.0", tk.END).strip()
+1. Category: one or more categories that best fit the item.
+2. Subcategory: one or more subcategories associated with the chosen
+   category (in parentheses next to the category, if applicable).
+3. Attributes: a list of relevant attributes for the item, drawn from the
+   attribute set that matches the selected category/subcategory (e.g.
+   material, condition, brand, size, era, color, etc.)
 
-    if image_path and text_input:
-       
-        file = upload_to_gemini(image_path)
-        generation_config = {
-            "temperature": 1,
-            "top_p": 0.95,
-            "top_k": 64,
-            "max_output_tokens": 8192,
-            "response_mime_type": "text/plain",
-        }
+Format the response clearly using this structure:
 
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-pro",
-            generation_config=generation_config,
-        )
+Category: <category 1>, <category 2>, ...
+Subcategory: <subcategory 1>, <subcategory 2>, ...
+Attributes:
+  - <attribute name>: <value or description>
+  - <attribute name>: <value or description>
+  ...
 
-        prompt = """
-Act as Auction House, The Auction House categories the items based on the title, description and image provided as input and as output provides the category , subcategory and attributes.
-The item can be placed in either one or more category  and either one or more subcategories (in the parentheses) if applicable. For the output, please return one more category( if applicable) and the subcategories. Also, for every item, give me the attributes for the item from the list of attributes matching the category selected for the item. Each category has pre-set of sub categories and attributes which are defined. 
-
-The Generated output response should contain following data :- 
-Category : Return one or more category 
-Subcategory : Return the List of Subcategory associated with the Category . Return one or more subcategory( If applicable)  
-Attributes : Return the List of attributes matching the category selected for the Item.
-
-        
+Be concise but thorough. If information is not visible or inferable, mark it
+as "Unknown" rather than guessing.
 """
 
-        response = model.generate_content([
-            prompt,
-            text_input,
-            file,
-            "output: "
-        ])
-        
-        # Output the API response
-        response_box.config(state=tk.NORMAL)
-        response_box.delete("1.0", tk.END)
-        response_box.insert(tk.END, response.text)
-        response_box.config(state=tk.DISABLED)
 
-# Set up Tkinter UI
-root = tk.Tk()
-root.title("Gemini API - Categories & Attributes")
+def configure_gemini(api_key: str) -> None:
+    if not api_key:
+        raise ValueError(
+            "No Gemini API key found. Set GEMINI_API_KEY as an environment "
+            "variable, or enter it in the API Key box in the UI."
+        )
+    genai.configure(api_key=api_key)
 
-# Create a Text input box for text
-text_label = tk.Label(root, text="Enter Text:")
-text_label.pack()
-text_box = tk.Text(root, height=5, width=50)
-text_box.pack()
 
-# Create a button to trigger image selection and processing
-submit_button = tk.Button(root, text="Submit Image and Process", command=process_input)
-submit_button.pack()
+def categorize_item(image_path: str, text_input: str, api_key: str):
+    """Uploads the image + text to Gemini and returns the categorization."""
 
-# Create a Text box to display the response
-response_label = tk.Label(root, text="API Response:")
-response_label.pack()
-response_box = tk.Text(root, height=15, width=50)
-response_box.pack()
-response_box.config(state=tk.DISABLED)
+    if not image_path:
+        return "⚠️ Please upload an image of the item."
+    if not text_input or not text_input.strip():
+        return "⚠️ Please enter a title/description for the item."
 
-# Run the Tkinter loop
-root.mainloop()
+    key_to_use = api_key.strip() if api_key and api_key.strip() else API_KEY
+
+    try:
+        configure_gemini(key_to_use)
+    except ValueError as e:
+        return f"❌ {e}"
+
+    try:
+        uploaded_file = genai.upload_file(image_path)
+
+        model = genai.GenerativeModel(
+            model_name=MODEL_NAME,
+            generation_config=GENERATION_CONFIG,
+        )
+
+        response = model.generate_content(
+            [PROMPT, text_input.strip(), uploaded_file, "output: "]
+        )
+
+        return response.text
+
+    except Exception as e:
+        return f"❌ Error while processing item: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Gradio UI
+# ---------------------------------------------------------------------------
+
+with gr.Blocks(title="Auction House Categorizer") as demo:
+    gr.Markdown(
+        """
+        # 🏺 Auction House Categorizer
+        Upload a photo of an item and provide a short title/description.
+        Gemini will suggest a **Category**, **Subcategory**, and relevant
+        **Attributes** for the item.
+        """
+    )
+
+    with gr.Row():
+        with gr.Column(scale=1):
+            image_input = gr.Image(
+                type="filepath",
+                label="Item Image",
+                height=320,
+            )
+            text_input = gr.Textbox(
+                label="Title / Description",
+                placeholder="e.g. Antique mahogany writing desk, early 1900s, "
+                            "brass handles, minor scuffing on top surface",
+                lines=5,
+            )
+            api_key_input = gr.Textbox(
+                label="Gemini API Key (optional if GEMINI_API_KEY env var is set)",
+                placeholder="Leave blank to use the environment variable",
+                type="password",
+            )
+            submit_btn = gr.Button("Categorize Item", variant="primary")
+            clear_btn = gr.Button("Clear")
+
+        with gr.Column(scale=1):
+            output_box = gr.Textbox(
+                label="Categorization Result",
+                lines=20,
+                interactive=False,
+            )
+
+    submit_btn.click(
+        fn=categorize_item,
+        inputs=[image_input, text_input, api_key_input],
+        outputs=output_box,
+    )
+
+    clear_btn.click(
+        fn=lambda: (None, "", "", ""),
+        inputs=[],
+        outputs=[image_input, text_input, api_key_input, output_box],
+    )
+
+if __name__ == "__main__":
+    demo.launch(theme=gr.themes.Soft())
